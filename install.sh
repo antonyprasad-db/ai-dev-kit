@@ -107,6 +107,11 @@ INSTALL_SKILLS=true
 MIN_CLI_VERSION="0.278.0"
 # Agent skills are delegated to `databricks aitools`, which ships with CLI v1.0.0+
 MIN_AITOOLS_CLI_VERSION="1.0.0"
+# CLI versions that added these `aitools --agents` targets. An agent the CLI
+# doesn't know fails the whole `aitools install` ("unknown agent"), so below its
+# floor the tool is left out of --agents and gets linked/mirrored copies instead.
+MIN_AITOOLS_GEMINI_CLI_VERSION="1.12.0"
+MIN_AITOOLS_KIRO_CLI_VERSION="1.20.0"
 
 # Colors
 G='\033[0;32m' Y='\033[1;33m' R='\033[0;31m' BL='\033[0;34m' B='\033[1m' D='\033[2m' N='\033[0m'
@@ -1638,6 +1643,12 @@ fetch_agent_b_inventory() {
     fi
 }
 
+# Installed Databricks CLI version (e.g. 1.20.0), or empty if the CLI is missing.
+databricks_cli_version() {
+    command -v databricks >/dev/null 2>&1 || return 0
+    databricks --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
+}
+
 # Gate for `databricks aitools` (ships with the Databricks CLI v1.0.0+).
 # Interactive: offers to run the upgrade and re-checks in a loop.
 # Silent/non-interactive: dies with instructions.
@@ -1645,10 +1656,8 @@ fetch_agent_b_inventory() {
 ensure_aitools_cli() {
     local attempts=0
     while true; do
-        local cli_version=""
-        if command -v databricks >/dev/null 2>&1; then
-            cli_version=$(databricks --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-        fi
+        local cli_version
+        cli_version=$(databricks_cli_version)
         if [ -n "$cli_version" ] && version_gte "$cli_version" "$MIN_AITOOLS_CLI_VERSION"; then
             return 0
         fi
@@ -1686,12 +1695,14 @@ ensure_aitools_cli() {
 }
 
 # Map selected $TOOLS to `aitools --agents` tokens. Tools aitools doesn't
-# install for are handled by deliver_agent_skills (which links every selected
-# tool's dir from the canonical store).
+# install for (Windsurf, and Gemini/Kiro on a CLI below their floor) are handled
+# by deliver_agent_skills (which links every selected tool's dir from the
+# canonical store).
 AITOOLS_AGENTS=""
 map_aitools_agents() {
     AITOOLS_AGENTS=""
-    local tool
+    local tool cli_version
+    cli_version=$(databricks_cli_version)
     for tool in $TOOLS; do
         case $tool in
             claude)      AITOOLS_AGENTS="${AITOOLS_AGENTS:+$AITOOLS_AGENTS,}claude-code" ;;
@@ -1700,6 +1711,16 @@ map_aitools_agents() {
             codex)       AITOOLS_AGENTS="${AITOOLS_AGENTS:+$AITOOLS_AGENTS,}codex" ;;
             opencode)    AITOOLS_AGENTS="${AITOOLS_AGENTS:+$AITOOLS_AGENTS,}opencode" ;;
             antigravity) AITOOLS_AGENTS="${AITOOLS_AGENTS:+$AITOOLS_AGENTS,}antigravity" ;;
+            gemini)
+                if [ -n "$cli_version" ] && version_gte "$cli_version" "$MIN_AITOOLS_GEMINI_CLI_VERSION"; then
+                    AITOOLS_AGENTS="${AITOOLS_AGENTS:+$AITOOLS_AGENTS,}gemini"
+                fi
+                ;;
+            kiro)
+                if [ -n "$cli_version" ] && version_gte "$cli_version" "$MIN_AITOOLS_KIRO_CLI_VERSION"; then
+                    AITOOLS_AGENTS="${AITOOLS_AGENTS:+$AITOOLS_AGENTS,}kiro"
+                fi
+                ;;
         esac
     done
 }
@@ -1775,8 +1796,8 @@ install_agent_b_skills() {
     # `databricks aitools install` define the full set itself (its default = every
     # stable skill; --experimental adds the rest). This installs the plugin for
     # agents that support it (Claude Code / Codex / Copilot) and raw files for the
-    # others, exactly as the CLI intends. Tools aitools can't target
-    # (Gemini/Windsurf/Kiro) are still mirrored the same set.
+    # others, exactly as the CLI intends. Tools aitools can't target (Windsurf,
+    # and Gemini/Kiro on an older CLI) are still mirrored the same set.
     if [ "$SELECTED_ALL_AGENT_B" = true ]; then
         install_agent_b_all "$base_dir"
         mkdir -p "$STATE_DIR"
@@ -2039,7 +2060,7 @@ deliver_agent_b_all() {
 
 # Link the agent skills into every selected tool's skills dir from the canonical
 # store, so tools aitools doesn't install for (project scope: everything except
-# Claude Code + Cursor; plus Gemini/Windsurf/Kiro, which aitools never targets)
+# Claude Code + Cursor; plus Windsurf, and Gemini/Kiro on an older CLI)
 # still get the skills. Entries aitools already created are left to aitools.
 # If no aitools-supported agent was selected there is no persistent store, so we
 # stage a throwaway install in a temp dir and copy real files from it.

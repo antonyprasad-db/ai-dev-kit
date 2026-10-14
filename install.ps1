@@ -60,6 +60,11 @@ $InstallDir = if ($env:AIDEVKIT_HOME) { $env:AIDEVKIT_HOME } else { Join-Path $e
 $MinCliVersion = "0.278.0"
 # Agent skills are delegated to `databricks aitools`, which ships with CLI v1.0.0+
 $MinAitoolsCliVersion = "1.0.0"
+# CLI versions that added these `aitools --agents` targets. An agent the CLI
+# doesn't know fails the whole `aitools install` ("unknown agent"), so below its
+# floor the tool is left out of --agents and gets linked/mirrored copies instead.
+$MinAitoolsGeminiCliVersion = "1.12.0"
+$MinAitoolsKiroCliVersion = "1.20.0"
 
 # ─── Defaults ─────────────────────────────────────────────────
 # DEVKIT_* env vars mirror the bash installer so both honor the same config.
@@ -1674,6 +1679,17 @@ function Get-AgentBInventory {
     }
 }
 
+# Installed Databricks CLI version (e.g. 1.20.0), or "" if the CLI is missing.
+function Get-DatabricksCliVersion {
+    if (Get-Command databricks -ErrorAction SilentlyContinue) {
+        try {
+            $cliOutput = & databricks --version 2>&1
+            if ($cliOutput -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
+        } catch {}
+    }
+    return ""
+}
+
 # Gate for `databricks aitools` (ships with the Databricks CLI v1.0.0+).
 # Interactive: offers to run the upgrade and re-checks in a loop.
 # Silent/non-interactive: errors out with instructions.
@@ -1681,13 +1697,7 @@ function Get-AgentBInventory {
 function Confirm-AitoolsCli {
     $attempts = 0
     while ($true) {
-        $cliVersion = ""
-        if (Get-Command databricks -ErrorAction SilentlyContinue) {
-            try {
-                $cliOutput = & databricks --version 2>&1
-                if ($cliOutput -match '(\d+\.\d+\.\d+)') { $cliVersion = $Matches[1] }
-            } catch {}
-        }
+        $cliVersion = Get-DatabricksCliVersion
         if ($cliVersion -and ([version]$cliVersion -ge [version]$MinAitoolsCliVersion)) {
             return $true
         }
@@ -1734,9 +1744,11 @@ function Confirm-AitoolsCli {
 }
 
 # Map selected tools to `aitools --agents` tokens. Tools aitools doesn't install
-# for are handled by Send-AgentSkills (which links every selected tool's dir).
+# for (Windsurf, and Gemini/Kiro on a CLI below their floor) are handled by
+# Send-AgentSkills (which links every selected tool's dir).
 function Resolve-AitoolsAgents {
     $agents = @()
+    $cliVersion = Get-DatabricksCliVersion
     foreach ($tool in ($script:Tools -split ' ')) {
         switch ($tool) {
             "claude"      { $agents += "claude-code" }
@@ -1745,6 +1757,8 @@ function Resolve-AitoolsAgents {
             "codex"       { $agents += "codex" }
             "opencode"    { $agents += "opencode" }
             "antigravity" { $agents += "antigravity" }
+            "gemini"      { if ($cliVersion -and ([version]$cliVersion -ge [version]$MinAitoolsGeminiCliVersion)) { $agents += "gemini" } }
+            "kiro"        { if ($cliVersion -and ([version]$cliVersion -ge [version]$MinAitoolsKiroCliVersion)) { $agents += "kiro" } }
         }
     }
     $script:AitoolsAgents = ($agents -join ',')
@@ -1842,8 +1856,8 @@ function Install-AgentBSkills {
     # `databricks aitools install` define the full set itself (its default = every
     # stable skill; --experimental adds the rest). This installs the plugin for
     # agents that support it (Claude Code / Codex / Copilot) and raw files for the
-    # others, exactly as the CLI intends. Tools aitools can't target
-    # (Gemini/Windsurf/Kiro) are still mirrored the same set.
+    # others, exactly as the CLI intends. Tools aitools can't target (Windsurf,
+    # and Gemini/Kiro on an older CLI) are still mirrored the same set.
     if ($script:SelectedAllAgentB) {
         Install-AgentBAll -BaseDir $BaseDir
         if (-not (Test-Path $script:StateDir)) {
@@ -2127,7 +2141,7 @@ function Send-AgentBAll {
 
 # Link the agent skills into every selected tool's skills dir from the canonical
 # store, so tools aitools doesn't install for (project scope: everything except
-# Claude Code + Cursor; plus Gemini/Windsurf/Kiro, which aitools never targets)
+# Claude Code + Cursor; plus Windsurf, and Gemini/Kiro on an older CLI)
 # still get the skills. Entries aitools already created are left to aitools.
 # Symlink creation can require elevated privileges on Windows, so fall back to
 # copying. If no aitools-supported agent was selected there is no persistent
