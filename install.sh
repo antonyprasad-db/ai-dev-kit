@@ -520,6 +520,25 @@ plugin_keys_project() { plugin_keys_in "$1/.claude/settings.json" "$1/.claude/se
 # Count skill folders and 'databricks' MCP entries under the given roots/targets,
 # plus hook/state/plugin, emitting one "  - ..." summary line each. Shared by the
 # project- and global-scope summaries below. Read-only; always returns 0.
+# Gemini CLI's global skills dir: <GEMINI_CLI_HOME>/.gemini/skills when that is
+# set, else ~/.gemini/skills. `databricks aitools` resolves it the same way, so
+# global installs must too or they link a second, untracked copy under ~/.gemini.
+# A trailing slash is dropped (as the CLI's filepath.Join does) so "$HOME/" is
+# still recognized as $HOME below.
+gemini_global_skills_dir() {
+    local root=${GEMINI_CLI_HOME:-$HOME}
+    echo "${root%/}/.gemini/skills"
+}
+
+# The relocated Gemini skills dir when GEMINI_CLI_HOME moves it, else empty.
+# Scans add it on top of ~/.gemini/skills, which can still hold older installs.
+gemini_relocated_skills_dir() {
+    local dir
+    dir=$(gemini_global_skills_dir)
+    [ "$dir" != "$HOME/.gemini/skills" ] && echo "$dir"
+    return 0
+}
+
 _leftovers_summary() {
     local hook=$1 state_dir=$2 plugin_keys=$3; shift 3
     local root name entry path kind n=0
@@ -566,10 +585,15 @@ project_leftovers_summary() {
 # Global/user-scope artifacts (what a --global uninstall removes).
 global_leftovers_summary() {
     local install_dir="${AIDEVKIT_HOME:-$HOME/.ai-dev-kit}"
+    local -a extra_roots=()
+    local gemini_extra
+    gemini_extra=$(gemini_relocated_skills_dir)
+    [ -n "$gemini_extra" ] && extra_roots+=("$gemini_extra")
     _leftovers_summary "$HOME/.claude/settings.json" "$install_dir" "$(plugin_keys_global)" \
         "$HOME/.claude/skills" "$HOME/.cursor/skills" "$HOME/.github/skills" \
         "$HOME/.agents/skills" "$HOME/.gemini/skills" "$HOME/.gemini/antigravity/skills" \
         "$HOME/.codeium/windsurf/skills" "$HOME/.config/opencode/skills" "$HOME/.kiro/skills" \
+        "${extra_roots[@]}" \
         -- \
         "$HOME/.claude.json|json:mcpServers" "$HOME/.codex/config.toml|toml" "$HOME/.gemini/settings.json|json:mcpServers" \
         "$HOME/.gemini/antigravity/mcp_config.json|json:mcpServers" "$HOME/.codeium/windsurf/mcp_config.json|json:mcpServers" \
@@ -670,6 +694,9 @@ run_uninstall() {
             "$HOME/.gemini/antigravity/skills" "$HOME/.codeium/windsurf/skills"
             "$HOME/.config/opencode/skills" "$HOME/.kiro/skills"
         )
+        local gemini_extra
+        gemini_extra=$(gemini_relocated_skills_dir)
+        [ -n "$gemini_extra" ] && skill_roots+=("$gemini_extra")
         mcp_targets=(
             "$HOME/.claude.json|json:mcpServers"
             "$HOME/.codex/config.toml|toml"
@@ -1644,9 +1671,14 @@ fetch_agent_b_inventory() {
 }
 
 # Installed Databricks CLI version (e.g. 1.20.0), or empty if the CLI is missing.
+# Prefers the "Databricks CLI vX.Y.Z" line so a version in an update notice
+# can't be picked up instead.
 databricks_cli_version() {
     command -v databricks >/dev/null 2>&1 || return 0
-    databricks --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
+    local out
+    out=$(databricks --version 2>/dev/null || true)
+    { echo "$out" | grep -oE 'Databricks CLI v[0-9]+\.[0-9]+\.[0-9]+' || echo "$out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true; } \
+        | head -1 | sed 's/^Databricks CLI v//'
 }
 
 # Gate for `databricks aitools` (ships with the Databricks CLI v1.0.0+).
@@ -1697,12 +1729,12 @@ ensure_aitools_cli() {
 # Map selected $TOOLS to `aitools --agents` tokens. Tools aitools doesn't
 # install for (Windsurf, and Gemini/Kiro on a CLI below their floor) are handled
 # by deliver_agent_skills (which links every selected tool's dir from the
-# canonical store).
+# canonical store). $1 optionally overrides the installed CLI version (dry run).
 AITOOLS_AGENTS=""
 map_aitools_agents() {
     AITOOLS_AGENTS=""
     local tool cli_version
-    cli_version=$(databricks_cli_version)
+    cli_version=${1:-$(databricks_cli_version)}
     for tool in $TOOLS; do
         case $tool in
             claude)      AITOOLS_AGENTS="${AITOOLS_AGENTS:+$AITOOLS_AGENTS,}claude-code" ;;
@@ -1726,8 +1758,9 @@ map_aitools_agents() {
 }
 
 # Skills dir for every selected tool (one per line, deduped). `aitools` only
-# fans out to some agents (e.g. project scope: just Claude Code + Cursor), so we
-# link the canonical store into every selected tool's dir ourselves.
+# fans out to some agents (e.g. project scope: Claude Code, Gemini and Kiro on
+# current CLIs), so we link the canonical store into every selected tool's dir
+# ourselves.
 agent_skill_target_dirs() {
     local base_dir=$1 tool
     for tool in $TOOLS; do
@@ -1736,7 +1769,7 @@ agent_skill_target_dirs() {
             cursor)   echo "$base_dir/.cursor/skills" ;;
             copilot)  echo "$base_dir/.github/skills" ;;
             codex)    echo "$base_dir/.agents/skills" ;;
-            gemini)   echo "$base_dir/.gemini/skills" ;;
+            gemini)   [ "$SCOPE" = "global" ] && gemini_global_skills_dir || echo "$base_dir/.gemini/skills" ;;
             antigravity) [ "$SCOPE" = "global" ] && echo "$HOME/.gemini/antigravity/skills" || echo "$base_dir/.agents/skills" ;;
             windsurf) [ "$SCOPE" = "global" ] && echo "$HOME/.codeium/windsurf/skills" || echo "$base_dir/.windsurf/skills" ;;
             opencode) [ "$SCOPE" = "global" ] && echo "$HOME/.config/opencode/skills" || echo "$base_dir/.opencode/skills" ;;
@@ -1834,8 +1867,8 @@ install_agent_b_skills() {
         ok "Agent skills ($count) installed — manage with ${B}databricks aitools list|update|uninstall${N}"
     fi
 
-    # aitools only installs for some agents (project scope: just Claude Code +
-    # Cursor). Link the canonical store into every other selected tool's dir.
+    # aitools only installs for some agents (project scope: Claude Code, Gemini
+    # and Kiro). Link the canonical store into every other selected tool's dir.
     deliver_agent_skills "$base_dir" "$skills_csv" "$exp_flag"
 
     # Record the selection so a future profile change can uninstall dropped skills
@@ -2060,8 +2093,8 @@ deliver_agent_b_all() {
 
 # Link the agent skills into every selected tool's skills dir from the canonical
 # store, so tools aitools doesn't install for (project scope: everything except
-# Claude Code + Cursor; plus Windsurf, and Gemini/Kiro on an older CLI)
-# still get the skills. Entries aitools already created are left to aitools.
+# Claude Code, Gemini and Kiro; plus Windsurf, and Gemini/Kiro on a CLI below
+# their floor) still get the skills. Entries aitools already created are left to aitools.
 # If no aitools-supported agent was selected there is no persistent store, so we
 # stage a throwaway install in a temp dir and copy real files from it.
 deliver_agent_skills() {
@@ -2197,7 +2230,7 @@ write_lockfile() {
     fi
     if [ -n "$SELECTED_AGENT_B_SKILLS" ]; then
         local cli_version
-        cli_version=$(databricks --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        cli_version=$(databricks_cli_version)
         entries="${entries:+$entries,
 }    \"databricks/databricks-agent-skills\": {\"install_method\": \"databricks-aitools\", \"cli_version\": \"${cli_version}\", \"skills_release\": \"${AGENT_B_RELEASE}\", \"fetched_at\": \"${now}\"}"
     fi
@@ -2208,11 +2241,31 @@ write_lockfile() {
 
 # ─── Dry run ──────────────────────────────────────────────────
 dry_run_report() {
-    map_aitools_agents
+    # A real run gates agent skills on ensure_aitools_cli, which first offers to
+    # upgrade a missing or pre-aitools CLI to the latest release. Preview that
+    # outcome, not today's CLI. The latest CLI clears every agent floor, so the
+    # highest floor (Kiro's) stands in for it.
+    local cli_version upgrade_first=false
+    if [ "$SELECTED_ALL_AGENT_B" = true ] || [ -n "$SELECTED_AGENT_B_SKILLS" ]; then
+        cli_version=$(databricks_cli_version)
+        if [ -z "$cli_version" ] || ! version_gte "$cli_version" "$MIN_AITOOLS_CLI_VERSION"; then
+            upgrade_first=true
+        fi
+    fi
+    if [ "$upgrade_first" = true ]; then
+        map_aitools_agents "$MIN_AITOOLS_KIRO_CLI_VERSION"
+    else
+        map_aitools_agents
+    fi
     echo ""
     echo -e "${B}Dry run — nothing was installed${N}"
     echo "────────────────────────────────"
     msg "MLflow skills @ ${MLFLOW_RESOLVED_REF:-n/a}: ${SELECTED_MLFLOW_SKILLS:-<none>}"
+    if [ "$upgrade_first" = true ]; then
+        local found="not found"
+        [ -n "$cli_version" ] && found="v${cli_version} is too old"
+        warn "Databricks CLI ${found}: a real run first offers to upgrade it to the latest CLI (non-interactive runs stop with upgrade steps). The plan below assumes the upgraded CLI is v${MIN_AITOOLS_KIRO_CLI_VERSION}+, new enough for every agent."
+    fi
     if [ "$SELECTED_ALL_AGENT_B" = true ]; then
         # "All" path: native install (plugin for Claude/Codex/Copilot, raw files
         # for the rest) with no --skills list; --experimental unless opted out.
@@ -2330,7 +2383,13 @@ install_skills() {
             cursor) dirs+=("$base_dir/.cursor/skills") ;;
             copilot) dirs+=("$base_dir/.github/skills") ;;
             codex) dirs+=("$base_dir/.agents/skills") ;;
-            gemini) dirs+=("$base_dir/.gemini/skills") ;;
+            gemini)
+                if [ "$SCOPE" = "global" ]; then
+                    dirs+=("$(gemini_global_skills_dir)")
+                else
+                    dirs+=("$base_dir/.gemini/skills")
+                fi
+                ;;
             antigravity)
                 if [ "$SCOPE" = "global" ]; then
                     dirs+=("$HOME/.gemini/antigravity/skills")
@@ -2655,6 +2714,9 @@ detect_prior_install() {
             "$HOME/.agents/skills" "$HOME/.gemini/skills" "$HOME/.gemini/antigravity/skills"
             "$HOME/.codeium/windsurf/skills" "$HOME/.config/opencode/skills" "$HOME/.kiro/skills"
         )
+        local gemini_extra
+        gemini_extra=$(gemini_relocated_skills_dir)
+        [ -n "$gemini_extra" ] && roots+=("$gemini_extra")
     else
         roots=(
             "$base_dir/.claude/skills" "$base_dir/.cursor/skills" "$base_dir/.github/skills"
