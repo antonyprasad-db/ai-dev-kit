@@ -514,12 +514,6 @@ plugin_keys_in() {
 plugin_keys_global()  { plugin_keys_in "$HOME/.claude/settings.json"; }
 plugin_keys_project() { plugin_keys_in "$1/.claude/settings.json" "$1/.claude/settings.local.json"; }
 
-# Warn that the plugin also exists in the scope we're NOT uninstalling, and print
-# the command to remove each detected key there too. $1 = newline-separated keys.
-# Leads with a blank line to separate it from whatever preceded it.
-# Count skill folders and 'databricks' MCP entries under the given roots/targets,
-# plus hook/state/plugin, emitting one "  - ..." summary line each. Shared by the
-# project- and global-scope summaries below. Read-only; always returns 0.
 # Gemini CLI's global skills dir: <GEMINI_CLI_HOME>/.gemini/skills when that is
 # set, else ~/.gemini/skills. `databricks aitools` resolves it the same way, so
 # global installs must too or they link a second, untracked copy under ~/.gemini.
@@ -539,6 +533,12 @@ gemini_relocated_skills_dir() {
     return 0
 }
 
+# Warn that the plugin also exists in the scope we're NOT uninstalling, and print
+# the command to remove each detected key there too. $1 = newline-separated keys.
+# Leads with a blank line to separate it from whatever preceded it.
+# Count skill folders and 'databricks' MCP entries under the given roots/targets,
+# plus hook/state/plugin, emitting one "  - ..." summary line each. Shared by the
+# project- and global-scope summaries below. Read-only; always returns 0.
 _leftovers_summary() {
     local hook=$1 state_dir=$2 plugin_keys=$3; shift 3
     local root name entry path kind n=0
