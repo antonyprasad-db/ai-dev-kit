@@ -733,17 +733,22 @@ $script:Scope = 'project'; $script:Silent = $false; $script:AssumeYes = $false
 
 @needs_pwsh
 @pytest.mark.parametrize(
-    "uninstall,dry_run,removed,warned",
+    "uninstall,dry_run,removed,reason",
     [
-        ("", "$false", True, False),
+        ("", "$false", True, None),
         # Remove-ClaudePlugin's failure path
-        ("Write-Err 'Could not remove the Claude Code plugin.'", "$false", False, True),
-        # any other error, e.g. Remove-Item under ErrorActionPreference Stop
-        ("throw 'Access to the path is denied.'", "$false", False, True),
-        ("", "$true", False, False),  # a dry run only previews the removal
+        (
+            "Write-Err 'Could not remove the Claude Code plugin.'",
+            "$false",
+            False,
+            "Could not remove the Claude Code plugin",
+        ),
+        # any other error, e.g. Remove-Item under ErrorActionPreference Stop, which prints nothing of its own
+        ("throw 'Access to the path is denied.'", "$false", False, "Access to the path is denied"),
+        ("", "$true", False, None),  # a dry run only previews the removal
     ],
 )
-def test_install_ps1_prior_install_cleanup_reports_its_result(tmp_path, uninstall, dry_run, removed, warned):
+def test_install_ps1_prior_install_cleanup_reports_its_result(tmp_path, uninstall, dry_run, removed, reason):
     # the PowerShell twin: a failed cleanup must not end the installer, and Write-Err exits again afterwards
     body = (
         f'$ErrorActionPreference = "Stop"\n{PS_PRIOR_INSTALL_STUBS}\n$script:DryRun = {dry_run}\n'
@@ -755,7 +760,11 @@ def test_install_ps1_prior_install_cleanup_reports_its_result(tmp_path, uninstal
     out = ANSI.sub("", result.stdout)
     assert "install continues, AssumeYes=False" in out, out + result.stderr
     assert ("v Previous install removed" in out) is removed
-    assert ("! Cleanup reported an issue" in out) is warned
+    # the warning says what failed
+    if reason:
+        assert f"! Cleanup reported an issue ({reason}) - continuing with the install." in out, out
+    else:
+        assert "! Cleanup reported an issue" not in out
     # outside the cleanup, Write-Err still ends the installer through its own exit, not a stray throw
     assert result.returncode == 1, out + result.stderr
     assert "x a later error" in out

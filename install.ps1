@@ -2904,13 +2904,14 @@ function Invoke-PriorInstallCheck {
     # slate. Force AssumeYes so it doesn't ask a second time (we already confirmed),
     # then restore it. While InPriorInstallCleanup is set, Write-Err throws instead of
     # exiting, so a failed step lands in the catch rather than ending the installer.
+    # The warning names the error, since only Write-Err prints its own message.
     # A dry run only previews the removal, so it doesn't claim the old install is gone.
     $savedAssumeYes = $script:AssumeYes
     $script:AssumeYes = $true
     $script:InPriorInstallCleanup = $true
     $cleaned = $true
     try { Invoke-Uninstall }
-    catch { $cleaned = $false; Write-Warn "Cleanup reported an issue - continuing with the install." }
+    catch { $cleaned = $false; Write-Warn "Cleanup reported an issue ($($_.Exception.Message.TrimEnd('.'))) - continuing with the install." }
     finally { $script:AssumeYes = $savedAssumeYes; $script:InPriorInstallCleanup = $false }
     if ($cleaned -and -not $script:DryRun) { Write-Ok "Previous install removed - continuing with a fresh install." }
 }
